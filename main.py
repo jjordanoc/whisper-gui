@@ -18,6 +18,8 @@ import inspect
 import time
 import json
 import subprocess
+import tempfile
+
 enablePrint()
 from scripts.whisper_model import load_custom_model, LANG_CODES
 from typing import Optional, Tuple, Callable
@@ -132,6 +134,7 @@ def same_params(
 def transcribe_whisperx(
 		model_name: str,
 		audio_path: str,
+		video_path: str,
 		micro_audio: tuple,
 		device: str,
 		batch_size: int,
@@ -240,8 +243,28 @@ def _transcribe() -> Tuple[str, str, str, str]:
 		else:
 			save_dir = save_root
 
+	# add mp4 support
+	if g_params["audio_path"] is None:
+		audio_path = g_params["video_path"]
+		print("Params: ", g_params)
+		print(f"Audio path: {audio_path}")
+		# make a temp WAV path
+		wav_path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+		# run ffmpeg to extract a 16-bit 16kHz mono wav
+		subprocess.run([
+				"ffmpeg", "-y",
+				"-i", audio_path,
+				"-ac", "1",       # mono
+				"-ar", "16000",   # 16 kHz
+				wav_path
+		], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+		audio_path = wav_path
+		print(f"Extracted audio to {audio_path}")
+	else:
+		audio_path = g_params["audio_path"]
+	
 	# Load (and save) audio
-	audio = load_and_save_audio(g_params["audio_path"], g_params["micro_audio"], g_params["save_audio"], save_dir, g_params["preserve_name"])
+	audio = load_and_save_audio(audio_path, g_params["micro_audio"], g_params["save_audio"], save_dir, g_params["preserve_name"])
 
 	# Transcription
 	if g_params["language"] == "auto": 
@@ -337,6 +360,7 @@ with gr.Blocks(title="Whisper GUI") as demo:
 			with gr.Column():
 				model_select = gr.Dropdown(whisperx_models, value="base", label=MSG["model_select_label"], info=MSG["change_whisper_reload"])
 				with gr.Group():
+					video_upload = gr.Video(sources=["upload"], label="Upload a video (mp4/mov/etc.)")	
 					audio_upload = gr.Audio(sources=["upload"], type="filepath", label=MSG["audio_upload_label"])
 					audio_record = gr.Audio(sources=["microphone"], type="numpy", label=MSG["audio_record_label"])
 					save_audio = gr.Checkbox(value=False, label=MSG["save_audio_label"], info=MSG["save_audio_info"])
@@ -408,7 +432,7 @@ with gr.Blocks(title="Whisper GUI") as demo:
 		apply_button = gr.Button(value=MSG["apply_changes"])
 	
 	submit_button.click(transcribe_whisperx,
-						inputs=[model_select, audio_upload, audio_record, device_select, batch_size_slider, compute_type_select, language_select, chunk_size_slider, beam_size_slider, release_memory_checkbox, save_root, save_audio, save_transcription, save_alignments, save_in_subfolder, preserve_name, alignments_format],
+						inputs=[model_select, audio_upload, video_upload, audio_record, device_select, batch_size_slider, compute_type_select, language_select, chunk_size_slider, beam_size_slider, release_memory_checkbox, save_root, save_audio, save_transcription, save_alignments, save_in_subfolder, preserve_name, alignments_format],
 						outputs=[transcription_output, alignments_output, time_transcribe, time_align])
 	
 	submit_button2.click(transcribe_custom,
