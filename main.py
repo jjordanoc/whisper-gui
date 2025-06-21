@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 
 enablePrint()
-from scripts.whisper_model import load_custom_model, LANG_CODES
+from scripts.whisper_model import load_custom_model, LANG_CODES, CustomWhisper
 from typing import Optional, Tuple, Callable
 from scripts.config_io import read_config_value, write_config_value
 from scripts.utils import *  # noqa: F403
@@ -101,6 +101,22 @@ def release_memory_models():
 	g_model_a = None
 	print(MSG["both_released"])
 
+def _get_initial_prompt(prompt_text: Optional[str], prompt_file: Optional[object]) -> Optional[str]:
+	initial_prompt = None
+	if prompt_file is not None and hasattr(prompt_file, 'name'):
+		with open(prompt_file.name, "r", encoding="utf-8") as f:
+			lines = [line.strip() for line in f.readlines()]
+			initial_prompt = ",".join(lines)
+	elif prompt_text:
+		words = [w.strip() for w in prompt_text.split(',')]
+		initial_prompt = ",".join(w for w in words if w)
+
+	if initial_prompt and initial_prompt.strip():
+		initial_prompt = "These are some useful words you might encounter during a conversation: " + initial_prompt
+	else:
+		initial_prompt = None
+	return initial_prompt
+
 def get_args_str(func: Callable) -> list:
 	"""
 	Get the names of the arguments of a function.
@@ -143,6 +159,8 @@ def transcribe_whisperx(
 		chunk_size: int,
 		beam_size: int,
 		release_memory: bool,
+		initial_prompt_text: Optional[str],
+		initial_prompt_file: Optional[object],
 		save_root: Optional[str],
 		save_audio: bool,
 		save_transcription: bool,
@@ -161,17 +179,20 @@ def transcribe_whisperx(
 	params = get_params(transcribe_whisperx, locals())
 	global g_model, g_params
 
+	initial_prompt = _get_initial_prompt(params.get("initial_prompt_text"), params.get("initial_prompt_file"))
+	params["initial_prompt"] = initial_prompt
+
 	if not same_params(params, g_params, "language"):
 		print(MSG["lang_changed"])
 		release_align()
 
-	if not same_params(params, g_params, "model_name", "device", "compute_type", "beam_size") or g_model is None:
+	if not same_params(params, g_params, "model_name", "device", "compute_type", "beam_size", "initial_prompt") or g_model is None:
 		if g_model is not None:
 			print(MSG["params_changed"])
 			release_whisper()
 		print(MSG["loading_model"])
 		blockPrint()
-		g_model = whisperx.load_model(model_name, device, compute_type=compute_type, asr_options={"beam_size": beam_size}, download_root="models/whisperx")
+		g_model = whisperx.load_model(model_name, device, compute_type=compute_type, asr_options={"beam_size": beam_size, "initial_prompt": initial_prompt}, download_root="models/whisperx")
 		enablePrint()
 	g_params = params
 
@@ -188,6 +209,8 @@ def transcribe_custom(
 		chunk_size: int,
 		beam_size: int,
 		release_memory: bool,
+		initial_prompt_text: Optional[str],
+		initial_prompt_file: Optional[object],
 		save_root: Optional[str],
 		save_audio: bool,
 		save_transcription: bool,
@@ -205,6 +228,9 @@ def transcribe_custom(
 		device = "cuda"
 	params = get_params(transcribe_custom, locals())
 	global g_model, g_params
+
+	initial_prompt = _get_initial_prompt(params.get("initial_prompt_text"), params.get("initial_prompt_file"))
+	params["initial_prompt"] = initial_prompt
 
 	if not same_params(params, g_params, "language", "device"):
 		print(MSG["lang_changed"])
@@ -271,9 +297,19 @@ def _transcribe() -> Tuple[str, str, str, str]:
 		language = None
 	else:
 		language = g_params["language"]
+	
+	initial_prompt = g_params.get("initial_prompt")
+
 	time_transcribe = time.time()
 	print(MSG["starting_transcription"])
-	result = g_model.transcribe(audio, batch_size=g_params["batch_size"], language=language, chunk_size=g_params["chunk_size"], print_progress=True)
+	result = {}
+	if isinstance(g_model, CustomWhisper):
+		result = g_model.transcribe(audio, batch_size=g_params["batch_size"], language=language, chunk_size=g_params["chunk_size"], print_progress=True, hotwords=initial_prompt)
+	elif g_model is not None:
+		result = g_model.transcribe(audio, batch_size=g_params["batch_size"], language=language, chunk_size=g_params["chunk_size"], print_progress=True)
+	else:
+		return "Error: Model not loaded.", "", "0s", "0s"
+
 	if "time" in result.keys():
 		time_transcribe = result["time"]
 	else:
@@ -359,6 +395,10 @@ with gr.Blocks(title="Whisper GUI") as demo:
 		with gr.Row():
 			with gr.Column():
 				model_select = gr.Dropdown(whisperx_models, value="base", label=MSG["model_select_label"], info=MSG["change_whisper_reload"])
+				with gr.Accordion(label="Initial Prompt (optional)", open=False):
+					gr.Markdown("Provide a list of common words or phrases to improve recognition. Default is file input if both are provided.")
+					initial_prompt_text = gr.Textbox(label="Comma-separated list", lines=2, placeholder="word1, phrase 2, ...")
+					initial_prompt_file = gr.File(label="Upload a .txt file (one phrase per line)", file_types=[".txt"])
 				with gr.Group():
 					video_upload = gr.Video(sources=["upload"], label="Upload a video (mp4/mov/etc.)")	
 					audio_upload = gr.Audio(sources=["upload"], type="filepath", label=MSG["audio_upload_label"])
@@ -396,6 +436,10 @@ with gr.Blocks(title="Whisper GUI") as demo:
 			with gr.Column():
 				with gr.Group():
 					model_select2 = gr.Dropdown(custom_models, value=None, label=MSG["model_select2_label"], allow_custom_value=True, info=MSG["change_whisper_reload"])
+				with gr.Accordion(label="Initial Prompt (optional)", open=False):
+					gr.Markdown("Provide a list of common words or phrases to improve recognition. Default is file input if both are provided.")
+					initial_prompt_text2 = gr.Textbox(label="Comma-separated list", lines=2, placeholder="word1, phrase 2, ...")
+					initial_prompt_file2 = gr.File(label="Upload a .txt file (one phrase per line)", file_types=[".txt"])
 				with gr.Group():
 					audio_upload2 = gr.Audio(sources=["upload"], type="filepath", label=MSG["audio_upload_label"])
 					audio_record2 = gr.Audio(sources=["microphone"], type="numpy", label=MSG["audio_record_label"])
@@ -428,15 +472,15 @@ with gr.Blocks(title="Whisper GUI") as demo:
 				release_memory_button2 = gr.Button(value=MSG["release_memory_button"])
 
 	with gr.Tab("Settings"):
-		lang_select = gr.Dropdown(LANG_DICT.keys(), value=LANG, label=MSG["lang_select_label"], allow_custom_value=True, info=MSG["lang_select_info"])
+		lang_select = gr.Dropdown(list(LANG_DICT.keys()), value=LANG, label=MSG["lang_select_label"], allow_custom_value=True, info=MSG["lang_select_info"])
 		apply_button = gr.Button(value=MSG["apply_changes"])
 	
 	submit_button.click(transcribe_whisperx,
-						inputs=[model_select, audio_upload, video_upload, audio_record, device_select, batch_size_slider, compute_type_select, language_select, chunk_size_slider, beam_size_slider, release_memory_checkbox, save_root, save_audio, save_transcription, save_alignments, save_in_subfolder, preserve_name, alignments_format],
+						inputs=[model_select, audio_upload, video_upload, audio_record, device_select, batch_size_slider, compute_type_select, language_select, chunk_size_slider, beam_size_slider, release_memory_checkbox, initial_prompt_text, initial_prompt_file, save_root, save_audio, save_transcription, save_alignments, save_in_subfolder, preserve_name, alignments_format],
 						outputs=[transcription_output, alignments_output, time_transcribe, time_align])
 	
 	submit_button2.click(transcribe_custom,
-						inputs=[model_select2, audio_upload2, audio_record2, device_select2, batch_size_slider2, compute_type_select2, language_select2, chunk_size_slider2, beam_size_slider2, release_memory_checkbox2, save_root2, save_audio2, save_transcription2, save_alignments2, save_in_subfolder2, preserve_name2, alignments_format2],
+						inputs=[model_select2, audio_upload2, audio_record2, device_select2, batch_size_slider2, compute_type_select2, language_select2, chunk_size_slider2, beam_size_slider2, release_memory_checkbox2, initial_prompt_text2, initial_prompt_file2, save_root2, save_audio2, save_transcription2, save_alignments2, save_in_subfolder2, preserve_name2, alignments_format2],
 						outputs=[transcription_output2, alignments_output2, time_transcribe2, time_align2])
 	
 	release_memory_button.click(release_memory_models)

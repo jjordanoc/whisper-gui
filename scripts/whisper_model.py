@@ -85,7 +85,7 @@ class CustomWhisper():
 		self.beam_size = beam_size
 		self.model.to(device)
 		
-	def _transcribe_segments(self, audio_batches, language):
+	def _transcribe_segments(self, audio_batches, language, hotwords: Optional[str] = None):
 		transcriptions = []
 		for audio_batch in audio_batches:
 			input_features = self.processor(
@@ -101,8 +101,14 @@ class CustomWhisper():
 				padding_length = required_length - current_length
 				padding = torch.zeros((input_features.shape[0], input_features.shape[1], padding_length), device=self.device, dtype=self.compute_type)
 				input_features = torch.cat([input_features, padding], dim=2)
-
-			predicted_ids = self.model.generate(input_features, language=language, num_beams=self.beam_size)
+			
+			if hotwords:
+				forced_decoder_ids = self.processor.get_decoder_prompt_ids(language=language, task="transcribe")
+				prompt_ids = self.processor.tokenizer(hotwords, add_special_tokens=False, return_tensors="pt").input_ids.to(self.device)
+				forced_decoder_ids = torch.cat([forced_decoder_ids, prompt_ids], dim=1)
+				predicted_ids = self.model.generate(input_features, forced_decoder_ids=forced_decoder_ids, num_beams=self.beam_size)
+			else:
+				predicted_ids = self.model.generate(input_features, language=language, num_beams=self.beam_size)
 
 			batch_transcriptions = self.processor.batch_decode(predicted_ids, skip_special_tokens=True)
 			transcriptions.extend(batch_transcriptions)
@@ -114,7 +120,8 @@ class CustomWhisper():
 			batch_size: int = 1,
 			language: str = None,
 			chunk_size: Optional[int] = 20,
-			print_progress: bool = True
+			print_progress: bool = True,
+			hotwords: Optional[str] = None
 	) -> Dict[str, List[Dict[str, Any]]]:
 		"""
 		Transcribe a given audio array.
@@ -185,7 +192,7 @@ class CustomWhisper():
 				percent_complete = round(percent_complete, 2)
 				print(MSG["processing_batch"].format(idx + 1, total_batches, percent_complete))
 
-			batch_transcriptions = self._transcribe_segments(audio_batch, lang_code)
+			batch_transcriptions = self._transcribe_segments(audio_batch, lang_code, hotwords=hotwords)
 			
 			for segment_idx, transcription in enumerate(batch_transcriptions):
 				actual_segment_idx = idx * batch_size + segment_idx
